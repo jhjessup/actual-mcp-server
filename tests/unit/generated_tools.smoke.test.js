@@ -176,15 +176,38 @@ console.log('Running generated tools smoke tests');
   // stubs we set up before the tools imported).
   adapterMod.default.withWriteSession = async (fn) => fn();
 
-  // #388: `resolveFilterId` is a PRE-FLIGHT, not a value-returning read, so the flat
-  // stubResponses map above cannot express it: the value it must return depends on its
-  // argument, and returning a fixed one would make the eleven Category B tools validate
+  // #388: `resolveFilterId`'s return value depends on its ARGUMENT, so the flat stubResponses
+  // map above cannot express it: returning a fixed id would make the Category B tools validate
   // against something the caller never sent. It also reaches the api by calling the module's
-  // own `getAccounts`, not the patched `adapter.getAccounts`, so without this it attempts a
+  // own `getAccounts`, not the patched `adapter.getAccounts`, so without a stub it attempts a
   // real connection and the smoke run fails on an auth error rather than on the tool.
-  // Here it accepts whatever it is given; the refusal behaviour is pinned by
-  // tests/unit/filter_id_tool_wiring.test.js, which calls the real thing.
-  adapterMod.default.resolveFilterId = async (_kind, value) => value;
+  //
+  // It used to be `async (_kind, value) => value`, on the stated grounds that the function was
+  // "a PRE-FLIGHT, not a value-returning read". That stopped being true when the three
+  // name-contract fields (`search_by_category.categoryName`, `search_by_payee.payeeName` and
+  // its `categoryName`) started resolving through it: the identity stub handed those tools the
+  // NAME back as if it were an id, so `t.category === 'Food'` matched nothing and the #81
+  // off-budget regression case failed for a reason that had nothing to do with off-budget
+  // accounts. A stub whose contract has drifted from the real function fails in exactly that
+  // shape — a confident red in an unrelated assertion — so this one mirrors the real
+  // semantics instead: an id passes through, a name resolves against the stubbed listing.
+  // Refusals stay out of scope here and are pinned by filter_id_tool_wiring.test.js, which
+  // calls the real thing.
+  adapterMod.default.resolveFilterId = async (kind, value) => {
+    if (typeof value !== 'string') return value;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return value;
+    const listing =
+      kind === 'account' ? adapterMod.default.getAccounts
+        : kind === 'category' ? adapterMod.default.getCategories
+        : kind === 'category_group' ? adapterMod.default.getCategoryGroups
+        : adapterMod.default.getPayees;
+    const rows = typeof listing === 'function' ? (await listing()) ?? [] : [];
+    const wanted = value.trim().toLowerCase();
+    const hit = (Array.isArray(rows) ? rows : []).find(
+      (r) => typeof r?.name === 'string' && r.name.trim().toLowerCase() === wanted,
+    );
+    return hit?.id ?? value;
+  };
 
   const toolNames = Object.keys(toolsIndex).filter(n => n !== 'default');
   let failures = 0;

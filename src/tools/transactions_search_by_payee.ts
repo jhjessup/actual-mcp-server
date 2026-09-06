@@ -3,11 +3,11 @@ import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 
 const InputSchema = z.object({
-  payeeName: z.string().optional().describe('Name of the payee/vendor to search for (optional for smoke tests)'),
+  payeeName: z.string().optional().describe('Name of the payee/vendor to search for, or its UUID. A name that matches more than one payee is refused with the candidate ids (optional for smoke tests)'),
   startDate: z.string().optional().describe('Optional: Start date in YYYY-MM-DD format'),
   endDate: z.string().optional().describe('Optional: End date in YYYY-MM-DD format'),
   accountId: z.string().optional().describe('Optional: Filter by specific account ID'),
-  categoryName: z.string().optional().describe('Optional: Filter by category name'),
+  categoryName: z.string().optional().describe('Optional: Filter by category name, or its UUID. A name that matches more than one category is refused with the candidate ids'),
   minAmount: z.number().optional().describe('Optional: Minimum amount in cents'),
   maxAmount: z.number().optional().describe('Optional: Maximum amount in cents'),
   limit: z.number().optional().default(100).describe('Optional: Maximum number of transactions to return (default: 100)'),
@@ -28,26 +28,19 @@ const tool: ToolDefinition = {
       await adapter.resolveFilterId('account', input.accountId, { verifyExists: true });
     }
 
-    // Step 1: Find payee ID by name
+    // Step 1: Find payee ID by name.
+    //
+    // The same hand-rolled `.find()` `transactions_search_by_category` carried, with the same two
+    // failures: an unknown name answered with `{transactions: [], count: 0, error}` (which a
+    // model reads as "no transactions for that payee", not as an error), and a duplicate name
+    // silently took the first match. Routed through the shared resolver so this tool answers a
+    // name the same way its own `accountId` two lines above already does. `acceptsName`, because
+    // `payeeName` IS a name by contract; only the failure paths change.
     let payeeId: string | undefined;
     if (input.payeeName) {
-      const payees = await adapter.getPayees();
-      const payee = payees.find((p: any) => 
-        p.name && p.name.toLowerCase() === input.payeeName!.toLowerCase()
-      );
-      if (!payee) {
-        // Payee not found - return empty result
-        return {
-          transactions: [],
-          count: 0,
-          totalAmount: 0,
-          payeeName: input.payeeName,
-          error: `Payee "${input.payeeName}" not found`,
-        };
-      }
-      payeeId = payee.id;
+      payeeId = await adapter.resolveFilterId('payee', input.payeeName, { acceptsName: true });
     }
-    
+
     // Step 2: Get base transactions (filtered by account and date range if provided)
     // getTransactions() requires an accountId — when none is provided, fetch from all accounts
     let allTransactions: any[];
@@ -86,24 +79,11 @@ const tool: ToolDefinition = {
       filtered = filtered.filter((t: any) => t.payee === payeeId);
     }
     
-    // Filter by category name (need to lookup category ID)
+    // Filter by category name (need to lookup category ID). Third copy of the same hand-rolled
+    // lookup, same two failures, same shared resolver.
     if (input.categoryName) {
-      const categories = await adapter.getCategories();
-      const category = categories.find((c: any) =>
-        c.name && c.name.toLowerCase() === input.categoryName!.toLowerCase()
-      );
-      if (category) {
-        filtered = filtered.filter((t: any) => t.category === category.id);
-      } else {
-        // Category not found - return empty
-        return {
-          transactions: [],
-          count: 0,
-          totalAmount: 0,
-          payeeName: input.payeeName,
-          error: `Category "${input.categoryName}" not found`,
-        };
-      }
+      const categoryId = await adapter.resolveFilterId('category', input.categoryName, { acceptsName: true });
+      filtered = filtered.filter((t: any) => t.category === categoryId);
     }
     
     // Filter by amount range

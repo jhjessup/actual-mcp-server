@@ -45,6 +45,25 @@ function check(condition, label, detail = '') {
 
   const adapter = adapterMod.default;
 
+  // `transactions_search_by_category` resolves `categoryName` through
+  // `adapter.resolveFilterId` rather than a hand-rolled `.find()` over `adapter.getCategories()`.
+  // The real resolver reaches the api through the MODULE's own `getCategories`, not the
+  // `adapter.getCategories` this file patches, so without a stub here it opens a real connection
+  // and this file fails on an auth error instead of on the bug it pins. Stubbed to mirror the
+  // real semantics (an id passes through, a name resolves against whatever
+  // `adapter.getCategories` currently returns) so the sub-tests below can keep swapping that
+  // listing between cases. The resolver's own refusal behaviour is pinned against the real
+  // thing by filter_id_resolution.test.js and filter_id_tool_wiring.test.js.
+  adapter.resolveFilterId = async (kind, value) => {
+    const listing = kind === 'account' ? adapter.getAccounts
+      : kind === 'category' ? adapter.getCategories
+      : adapter.getPayees;
+    const rows = (await listing()) ?? [];
+    const wanted = String(value).trim().toLowerCase();
+    const hit = rows.find((r) => typeof r?.name === 'string' && r.name.trim().toLowerCase() === wanted);
+    return hit?.id ?? value;
+  };
+
   // ─── Bug 1: search_by_category — multi-account fetch ─────────────────────
   console.log('\n[bug76] Bug 1 — actual_transactions_search_by_category: 0 results when no accountId');
 

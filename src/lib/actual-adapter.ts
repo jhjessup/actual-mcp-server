@@ -1640,7 +1640,7 @@ export const notifications = new EventEmitter();
 // Extracted to ./actual-adapter/normalize.ts (#166). Imported for internal use
 // and re-exported so the public surface and external importers are unchanged.
 import { normalizeToTransactionArray, normalizeToId, normalizeImportResult } from './actual-adapter/normalize.js';
-import { isEntityId, matchByName, resolvedNameDetail, FILTER_ID_ENTITIES } from './actual-adapter/filter-ids.js';
+import { isEntityId, matchesByName, resolvedNameDetail, ambiguousNameDetail, FILTER_ID_ENTITIES } from './actual-adapter/filter-ids.js';
 import type { FilterIdKind, NamedRow } from './actual-adapter/filter-ids.js';
 import type {
   FinancialAnalysisSnapshot,
@@ -1888,14 +1888,28 @@ export async function getPayees(): Promise<components['schemas']['Payee'][]> {
  * UUID would impose a cost on every correct call to fix a mistake nobody makes. The mistake that
  * actually happens, and that this ticket is about, is a NAME passed where an id belongs, which is
  * caught on both paths because a name is never a UUID.
+ *
+ * `acceptsName` IS NOT A SOFTER `verifyExists`, and the difference is a CONTRACT difference
+ * rather than a preference. The fields #388 was written for publish themselves as ids, so a name
+ * is a caller mistake and the only honest answer is a refusal that hands back the id. Three
+ * fields publish themselves as NAMES or as "id or name" — `transactions_search_by_category`'s
+ * `categoryName`, `transactions_search_by_payee`'s `payeeName`/`categoryName`, and
+ * `transactions_update`'s `fields.payee` — and for those a name is the documented input, so
+ * refusing it would break the published contract rather than enforce it. Passing `acceptsName`
+ * makes an UNAMBIGUOUS name resolve to its id and be returned. Everything else is unchanged:
+ * a well-formed id is still verified, an unknown value still refuses, and an AMBIGUOUS name
+ * still refuses (naming every candidate), because picking one would be the silent wrong answer
+ * this whole resolver exists to remove.
  */
 export async function resolveFilterId(
   kind: FilterIdKind,
   value: string,
-  opts?: { verifyExists?: boolean; rows?: readonly NamedRow[] },
+  opts?: { verifyExists?: boolean; rows?: readonly NamedRow[]; acceptsName?: boolean },
 ): Promise<string> {
-  // The free path, and the one every correct call takes.
-  if (!opts?.verifyExists && isEntityId(value)) return value;
+  // The free path, and the one every correct call takes. `acceptsName` does not open it up:
+  // those callers use the value to FILTER or to WRITE, so an id they never checked is exactly
+  // the silent-empty-result this resolver replaces.
+  if (!opts?.verifyExists && !opts?.acceptsName && isEntityId(value)) return value;
 
   const { entity, listTool } = FILTER_ID_ENTITIES[kind];
   // `rows` lets a caller that ALREADY holds the listing avoid a second read of it. Without it,
@@ -1909,14 +1923,22 @@ export async function resolveFilterId(
       : await getPayees());
 
   if (isEntityId(value)) {
-    // Only reachable under verifyExists. A well-formed id that names nothing is a not-found,
-    // not a name to resolve.
+    // Only reachable under verifyExists or acceptsName. A well-formed id that names nothing is a
+    // not-found, not a name to resolve.
     if (rows.some((r) => r.id === value)) return value;
     throw new NotFoundRefusal(entity, value, listTool);
   }
 
-  const hit = matchByName(rows, value);
+  const hits = matchesByName(rows, value);
+  // More than one row answers to this name, so no single id is the answer. Refuse with all of
+  // them rather than returning the first, under BOTH modes: `acceptsName` licenses resolving a
+  // name, not guessing which record the caller meant.
+  if (hits.length > 1) {
+    throw new NotFoundRefusal(entity, value, listTool, undefined, ambiguousNameDetail(kind, value, hits));
+  }
+  const hit = hits[0];
   if (hit && typeof hit.id === 'string') {
+    if (opts?.acceptsName) return hit.id;
     const resolved = resolvedNameDetail(kind, String(hit.name), hit.id);
     throw new NotFoundRefusal(entity, value, listTool, undefined, resolved);
   }
