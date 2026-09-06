@@ -2145,6 +2145,81 @@ export async function deleteAccount(id: string): Promise<void> {
     await withConcurrency(() => retry(() => rawDeleteAccount(id) as Promise<void>, { retries: 0, backoffMs: 200 }));
   });
 }
+/**
+ * Verify the ENTITY IDS carried inside a transaction update's `fields`, before anything is
+ * written, and resolve the one field whose contract permits a name.
+ *
+ * WHY THIS EXISTS. `updateTransaction` has pre-flighted the transaction's OWN id since #212,
+ * because the raw API silently no-ops on a missing one. The ids INSIDE `fields` had no such
+ * check, and they fail worse than a no-op: `db.updateTransaction` writes whatever category or
+ * payee id it is handed without looking it up, so a made-up id is stored, the call returns
+ * success, and the transaction is then categorised to nothing that any listing returns. That is
+ * #360's phantom-row shape one level down, and it is the shape a model produces most often,
+ * because an id it half-remembers from earlier in a conversation is well-formed and wrong.
+ *
+ * ONE LISTING PER ENTITY KIND, NOT ONE PER FIELD. Every read goes through `readDrainListing`,
+ * which memoises for the current write drain, so a 50-item batch that sets a category on every
+ * item pays one categories listing in total, and a caller that also passes `rows` elsewhere in
+ * the same drain pays none. The rows are handed to `resolveFilterId` explicitly so it never
+ * falls back to its own `withActualApi` read from inside the write queue.
+ *
+ * `payee` IS DELIBERATELY NOT TREATED LIKE THE OTHER TWO. `category` and `account` publish
+ * themselves as ids, so `verifyExists` is the whole job: exists, or a typed refusal. `payee`
+ * has published "Payee ID or name" for as long as the tool has existed, so a name is documented
+ * input, not caller error, and REFUSING it would be the breaking change rather than the fix.
+ * It is resolved instead (`acceptsName`), which makes the documented contract true for the first
+ * time: today a name is written straight through as if it were an id. An ambiguous name still
+ * refuses, naming every candidate, because a name matching two payees identifies neither.
+ */
+async function resolveTransactionFieldIds(fields: unknown): Promise<unknown> {
+  if (typeof fields !== 'object' || fields === null) return fields;
+  const supplied = fields as Record<string, unknown>;
+  // `null` is a legitimate value here: it CLEARS the field (uncategorise, unlink the payee), so
+  // it must reach the write untouched. Only a non-empty string names something to check.
+  const given = (key: string): string | undefined =>
+    typeof supplied[key] === 'string' && supplied[key] !== '' ? (supplied[key] as string) : undefined;
+
+  const subs = Array.isArray(supplied.subtransactions)
+    ? (supplied.subtransactions as Array<Record<string, unknown>>)
+    : [];
+  const childCategories = subs
+    .map((s) => (typeof s?.category === 'string' && s.category !== '' ? s.category : undefined))
+    .filter((c): c is string => c !== undefined);
+
+  const category = given('category');
+  const account = given('account');
+  const payee = given('payee');
+  if (category === undefined && account === undefined && payee === undefined && childCategories.length === 0) {
+    return fields;
+  }
+
+  const listing = <T>(kind: DrainListingKind, fetch: () => Promise<T>): Promise<T> =>
+    withConcurrency(() => retry(() => readDrainListing(kind, fetch), { retries: 2, backoffMs: 200 }));
+
+  // A split's CHILD categories are checked with the parent's, against the same memoised listing.
+  // Leaving them out would have made the check trivially avoidable: the same wrong id written
+  // through `subtransactions` instead of `fields.category`.
+  const wantedCategories = category !== undefined ? [category, ...childCategories] : childCategories;
+  if (wantedCategories.length > 0) {
+    const rows = await listing('categories', () => rawGetCategories() as Promise<NamedRow[]>);
+    for (const value of wantedCategories) {
+      await resolveFilterId('category', value, { verifyExists: true, rows });
+    }
+  }
+
+  if (account !== undefined) {
+    const rows = await listing('accounts', () => rawGetAccounts() as Promise<NamedRow[]>);
+    await resolveFilterId('account', account, { verifyExists: true, rows });
+  }
+
+  if (payee === undefined) return fields;
+  const payeeRows = await listing('payees', () => rawGetPayees() as Promise<NamedRow[]>);
+  const resolvedPayee = await resolveFilterId('payee', payee, { acceptsName: true, rows: payeeRows });
+  // Copy only when the value actually changed, so an id-shaped payee reaches the raw call as the
+  // very same object the caller passed.
+  return resolvedPayee === payee ? fields : { ...supplied, payee: resolvedPayee };
+}
+
 export async function updateTransaction(id: string, fields: Partial<components['schemas']['Transaction']> | unknown): Promise<void> {
   observability.incrementToolCall('actual.transactions.update').catch(() => {});
   // Use write queue to batch concurrent updates in a single budget session
@@ -2200,7 +2275,11 @@ export async function updateTransaction(id: string, fields: Partial<components['
       }
     }
 
-    await withConcurrency(() => retry(() => rawUpdateTransaction(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // The ids INSIDE fields, checked in the SAME queued operation as the write (the #429
+    // convention), so nothing can create or remove a category between the check and the write.
+    const resolvedFields = await resolveTransactionFieldIds(fields);
+
+    await withConcurrency(() => retry(() => rawUpdateTransaction(id, resolvedFields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
   });
 }
 export async function updateTransactionBatch(
@@ -2241,8 +2320,13 @@ export async function updateTransactionBatch(
         continue;
       }
       try {
+        // Inside the per-item try ON PURPOSE: a refusal for one item's category or payee is a
+        // per-item failure like any other here, not a reason to abandon the other 49. The
+        // listings it reads are memoised for the whole drain, so this is one read per entity
+        // kind for the batch, not one per item.
+        const resolvedFields = await resolveTransactionFieldIds(fields);
         await withConcurrency(() =>
-          retry(() => rawUpdateTransaction(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError })
+          retry(() => rawUpdateTransaction(id, resolvedFields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError })
         );
         succeeded.push({ id });
       } catch (err) {

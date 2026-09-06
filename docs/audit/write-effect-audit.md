@@ -135,7 +135,7 @@ merely proposed. Where it says OPEN, the ticket exists and the behaviour is stil
 | `actual_accounts_delete` | verify-after in the tool (#347) |
 | `actual_budgets_import` | fixed in #349 |
 | `actual_transactions_delete` | adapter pre-flight by id with `splits: 'all'` (#212/#305); upstream also returns `[]` |
-| `actual_transactions_update` | same pre-flight (#212/#305) |
+| `actual_transactions_update` | same pre-flight (#212/#305), plus an existence check on the ids INSIDE `fields` (`category`, `account`, `payee`, and a split's child categories) in the same queued write |
 | `actual_categories_delete` | adapter pre-check, AND upstream throws `Category with id X not found.` |
 | `actual_category_groups_delete` | tool pre-check against `getCategoryGroups()`, which includes hidden groups when called with no argument |
 | `actual_schedules_delete` | tool pre-check against `getSchedules()`, plus constraint-error translation |
@@ -201,7 +201,7 @@ something.
 | `actual_tags_create` | not traced | trace for a silent no-op on a duplicate tag |
 | `actual_account_groups_create` | not traced | trace for a silent duplicate-name outcome, the same shape as `actual_category_groups_create`. Upstream sends `api/account-group-create` and returns an id; whether a duplicate name mints a second group or returns the existing one is unverified (#429) |
 | `actual_transactions_import` | not traced; **do this one next** | `importTransactions` routes to `reconcileTransactions`, which takes `acctId` without looking it up, so it may share `actual_transactions_create`'s shape D exactly |
-| `actual_transactions_update_batch` | not traced | trace whether a failed entry can leave a partial field write |
+| `actual_transactions_update_batch` | partly traced: its `fields` ids are now checked per item (a refusal lands in `failed[]`, like any other per-item error) | still trace whether a failed entry can leave a partial field write |
 | `actual_bank_sync` | not traced; reaches a THIRD PARTY, so the effect is not ours alone | trace what a provider-side failure returns |
 | `actual_query_run` | not traced; read-only in practice but not by construction | confirm no statement shape reaches a write path |
 
