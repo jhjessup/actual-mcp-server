@@ -135,14 +135,18 @@ merely proposed. Where it says OPEN, the ticket exists and the behaviour is stil
 | `actual_accounts_delete` | verify-after in the tool (#347) |
 | `actual_budgets_import` | fixed in #349 |
 | `actual_transactions_delete` | adapter pre-flight by id with `splits: 'all'` (#212/#305); upstream also returns `[]` |
-| `actual_transactions_update` | same pre-flight (#212/#305) |
+| `actual_transactions_update` | same pre-flight (#212/#305), plus an existence check on the ids INSIDE `fields` (`category`, `account`, `payee`, and a split's child categories) in the same queued write |
 | `actual_categories_delete` | adapter pre-check, AND upstream throws `Category with id X not found.` |
 | `actual_category_groups_delete` | tool pre-check against `getCategoryGroups()`, which includes hidden groups when called with no argument |
 | `actual_schedules_delete` | tool pre-check against `getSchedules()`, plus constraint-error translation |
 | `actual_schedules_update` | upstream throws `Schedule X not found` (`api.ts:920`) |
 | `actual_tags_delete` | adapter pre-check against `getTags()` |
+| `actual_account_groups_update` | adapter pre-check against `getAccountGroups()`, throwing `NotFoundRefusal`, in the SAME queued operation as the write (#429) |
+| `actual_account_groups_delete` | same adapter pre-check (#429). Note the delete is not purely its own table: upstream nulls `account_group_id` on every member account first, which is why it claims no listing preservation |
 | `actual_tags_update` | adapter throws `notFoundMsg('Tag', ...)` |
-| `actual_rules_update` | adapter throws `Rule with id <id> not found` |
+| `actual_rules_update` | adapter throws `Rule with id <id> not found`, and verifies every id-typed condition/action value the CALLER supplied against the real listings |
+| `actual_rules_create` | adapter verifies every id-typed condition and `set`-action value against the real listings before the write (`collectRuleEntityIds` in `src/lib/rule-fields.ts`), refusing with the offending `conditions[n].value` named |
+| `actual_rules_create_or_update` | the same check, run BEFORE the create-or-update branch is chosen, so an unresolvable id cannot create on the first call and refuse on the second |
 | `actual_payees_delete` (unknown id) | adapter pre-check against `getPayees()` |
 | `actual_budgets_setAmount` (unknown category) | adapter pre-check since #89 |
 | `actual_budgets_setCarryover` | upstream validates BOTH month and category |
@@ -193,12 +197,11 @@ something.
 | `actual_budget_updates_batch` | not traced; the one tool that calls raw api functions directly | trace whether a mid-batch failure leaves earlier writes applied |
 | `actual_categories_create` | not traced | trace for an unvalidated `group_id` (shape D) |
 | `actual_category_groups_create` | not traced | trace for a silent duplicate-name outcome |
-| `actual_rules_create` | not traced | trace for an unvalidated payee or category in conditions and actions |
-| `actual_rules_create_or_update` | not traced | same as `actual_rules_create`, plus the update branch |
 | `actual_payees_create` | not traced | trace for a silent merge into an existing payee |
 | `actual_tags_create` | not traced | trace for a silent no-op on a duplicate tag |
+| `actual_account_groups_create` | not traced | trace for a silent duplicate-name outcome, the same shape as `actual_category_groups_create`. Upstream sends `api/account-group-create` and returns an id; whether a duplicate name mints a second group or returns the existing one is unverified (#429) |
 | `actual_transactions_import` | not traced; **do this one next** | `importTransactions` routes to `reconcileTransactions`, which takes `acctId` without looking it up, so it may share `actual_transactions_create`'s shape D exactly |
-| `actual_transactions_update_batch` | not traced | trace whether a failed entry can leave a partial field write |
+| `actual_transactions_update_batch` | partly traced: its `fields` ids are now checked per item (a refusal lands in `failed[]`, like any other per-item error) | still trace whether a failed entry can leave a partial field write |
 | `actual_bank_sync` | not traced; reaches a THIRD PARTY, so the effect is not ours alone | trace what a provider-side failure returns |
 | `actual_query_run` | not traced; read-only in practice but not by construction | confirm no statement shape reaches a write path |
 

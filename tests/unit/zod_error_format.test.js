@@ -91,7 +91,7 @@ const ok = (cond, l, d = '') => cond ? pass(l) : fail(l, d);
     const { CommonSchemas } = await import('../../dist/src/lib/schemas/common.js');
     const G = z.object({ group_id: CommonSchemas.categoryGroupId }).strict();
     eq(formatZodError(G.safeParse({}).error, G),
-      'Validation error: group_id is required (Category group UUID; list with actual_category_groups_get)',
+      'Validation error: group_id is required (Category group UUID. Must come from a prior actual_category_groups_get call; never construct, abbreviate or guess one.)',
       'missing group_id surfaces the actual_category_groups_get pointer');
   }
 
@@ -129,7 +129,7 @@ const ok = (cond, l, d = '') => cond ? pass(l) : fail(l, d);
       catch (e) { return e?.message ?? String(e); }
     };
     eq(await call('actual_transactions_create', {}),
-      'Validation error: account is required (Account UUID), date is required (Date in YYYY-MM-DD format), amount is required (Amount in cents (negative for expenses, positive for income))',
+      'Validation error: account is required (Account UUID. Must come from a prior actual_accounts_list call; never construct, abbreviate or guess one.), date is required (Date in YYYY-MM-DD format), amount is required (Amount in cents (negative for expenses, positive for income))',
       'transactions_create missing-fields wired end to end');
     eq(await call('actual_entities_search', { type: 'payees', query: 'x', matchType: 'regex' }),
       'Validation error: matchType: allowed values: contains, startsWith, endsWith, exact, fuzzy',

@@ -65,14 +65,19 @@ const {
   exportBudget: rawExportBudget,
   importBudget: rawImportBudget,
   getPreferences: rawGetPreferences,
+  getAccountGroups: rawGetAccountGroups,
+  createAccountGroup: rawCreateAccountGroup,
+  updateAccountGroup: rawUpdateAccountGroup,
+  deleteAccountGroup: rawDeleteAccountGroup,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 } = api as any;
 import { EventEmitter } from 'events';
 import observability from '../observability.js';
 import { retry, isRetryableError, isRateLimitError } from './retry.js';
 import { withOpTimeout } from './opTimeout.js';
-import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg } from './errors.js';
+import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg, isPreflightRefusal } from './errors.js';
 import { findMatchingRule, type RuleCondition } from './rule-matching.js';
+import { collectRuleEntityIds } from './rule-fields.js';
 import logger from '../logger.js';
 import { checkServerVersionOnce } from './server-version-guard.js';
 import config from '../config.js';
@@ -1636,7 +1641,7 @@ export const notifications = new EventEmitter();
 // Extracted to ./actual-adapter/normalize.ts (#166). Imported for internal use
 // and re-exported so the public surface and external importers are unchanged.
 import { normalizeToTransactionArray, normalizeToId, normalizeImportResult } from './actual-adapter/normalize.js';
-import { isEntityId, matchByName, resolvedNameDetail, FILTER_ID_ENTITIES } from './actual-adapter/filter-ids.js';
+import { isEntityId, matchesByName, resolvedNameDetail, ambiguousNameDetail, FILTER_ID_ENTITIES } from './actual-adapter/filter-ids.js';
 import type { FilterIdKind, NamedRow } from './actual-adapter/filter-ids.js';
 import type {
   FinancialAnalysisSnapshot,
@@ -1884,14 +1889,28 @@ export async function getPayees(): Promise<components['schemas']['Payee'][]> {
  * UUID would impose a cost on every correct call to fix a mistake nobody makes. The mistake that
  * actually happens, and that this ticket is about, is a NAME passed where an id belongs, which is
  * caught on both paths because a name is never a UUID.
+ *
+ * `acceptsName` IS NOT A SOFTER `verifyExists`, and the difference is a CONTRACT difference
+ * rather than a preference. The fields #388 was written for publish themselves as ids, so a name
+ * is a caller mistake and the only honest answer is a refusal that hands back the id. Three
+ * fields publish themselves as NAMES or as "id or name" — `transactions_search_by_category`'s
+ * `categoryName`, `transactions_search_by_payee`'s `payeeName`/`categoryName`, and
+ * `transactions_update`'s `fields.payee` — and for those a name is the documented input, so
+ * refusing it would break the published contract rather than enforce it. Passing `acceptsName`
+ * makes an UNAMBIGUOUS name resolve to its id and be returned. Everything else is unchanged:
+ * a well-formed id is still verified, an unknown value still refuses, and an AMBIGUOUS name
+ * still refuses (naming every candidate), because picking one would be the silent wrong answer
+ * this whole resolver exists to remove.
  */
 export async function resolveFilterId(
   kind: FilterIdKind,
   value: string,
-  opts?: { verifyExists?: boolean; rows?: readonly NamedRow[] },
+  opts?: { verifyExists?: boolean; rows?: readonly NamedRow[]; acceptsName?: boolean },
 ): Promise<string> {
-  // The free path, and the one every correct call takes.
-  if (!opts?.verifyExists && isEntityId(value)) return value;
+  // The free path, and the one every correct call takes. `acceptsName` does not open it up:
+  // those callers use the value to FILTER or to WRITE, so an id they never checked is exactly
+  // the silent-empty-result this resolver replaces.
+  if (!opts?.verifyExists && !opts?.acceptsName && isEntityId(value)) return value;
 
   const { entity, listTool } = FILTER_ID_ENTITIES[kind];
   // `rows` lets a caller that ALREADY holds the listing avoid a second read of it. Without it,
@@ -1905,14 +1924,22 @@ export async function resolveFilterId(
       : await getPayees());
 
   if (isEntityId(value)) {
-    // Only reachable under verifyExists. A well-formed id that names nothing is a not-found,
-    // not a name to resolve.
+    // Only reachable under verifyExists or acceptsName. A well-formed id that names nothing is a
+    // not-found, not a name to resolve.
     if (rows.some((r) => r.id === value)) return value;
     throw new NotFoundRefusal(entity, value, listTool);
   }
 
-  const hit = matchByName(rows, value);
+  const hits = matchesByName(rows, value);
+  // More than one row answers to this name, so no single id is the answer. Refuse with all of
+  // them rather than returning the first, under BOTH modes: `acceptsName` licenses resolving a
+  // name, not guessing which record the caller meant.
+  if (hits.length > 1) {
+    throw new NotFoundRefusal(entity, value, listTool, undefined, ambiguousNameDetail(kind, value, hits));
+  }
+  const hit = hits[0];
   if (hit && typeof hit.id === 'string') {
+    if (opts?.acceptsName) return hit.id;
     const resolved = resolvedNameDetail(kind, String(hit.name), hit.id);
     throw new NotFoundRefusal(entity, value, listTool, undefined, resolved);
   }
@@ -2119,6 +2146,81 @@ export async function deleteAccount(id: string): Promise<void> {
     await withConcurrency(() => retry(() => rawDeleteAccount(id) as Promise<void>, { retries: 0, backoffMs: 200 }));
   });
 }
+/**
+ * Verify the ENTITY IDS carried inside a transaction update's `fields`, before anything is
+ * written, and resolve the one field whose contract permits a name.
+ *
+ * WHY THIS EXISTS. `updateTransaction` has pre-flighted the transaction's OWN id since #212,
+ * because the raw API silently no-ops on a missing one. The ids INSIDE `fields` had no such
+ * check, and they fail worse than a no-op: `db.updateTransaction` writes whatever category or
+ * payee id it is handed without looking it up, so a made-up id is stored, the call returns
+ * success, and the transaction is then categorised to nothing that any listing returns. That is
+ * #360's phantom-row shape one level down, and it is the shape a model produces most often,
+ * because an id it half-remembers from earlier in a conversation is well-formed and wrong.
+ *
+ * ONE LISTING PER ENTITY KIND, NOT ONE PER FIELD. Every read goes through `readDrainListing`,
+ * which memoises for the current write drain, so a 50-item batch that sets a category on every
+ * item pays one categories listing in total, and a caller that also passes `rows` elsewhere in
+ * the same drain pays none. The rows are handed to `resolveFilterId` explicitly so it never
+ * falls back to its own `withActualApi` read from inside the write queue.
+ *
+ * `payee` IS DELIBERATELY NOT TREATED LIKE THE OTHER TWO. `category` and `account` publish
+ * themselves as ids, so `verifyExists` is the whole job: exists, or a typed refusal. `payee`
+ * has published "Payee ID or name" for as long as the tool has existed, so a name is documented
+ * input, not caller error, and REFUSING it would be the breaking change rather than the fix.
+ * It is resolved instead (`acceptsName`), which makes the documented contract true for the first
+ * time: today a name is written straight through as if it were an id. An ambiguous name still
+ * refuses, naming every candidate, because a name matching two payees identifies neither.
+ */
+async function resolveTransactionFieldIds(fields: unknown): Promise<unknown> {
+  if (typeof fields !== 'object' || fields === null) return fields;
+  const supplied = fields as Record<string, unknown>;
+  // `null` is a legitimate value here: it CLEARS the field (uncategorise, unlink the payee), so
+  // it must reach the write untouched. Only a non-empty string names something to check.
+  const given = (key: string): string | undefined =>
+    typeof supplied[key] === 'string' && supplied[key] !== '' ? (supplied[key] as string) : undefined;
+
+  const subs = Array.isArray(supplied.subtransactions)
+    ? (supplied.subtransactions as Array<Record<string, unknown>>)
+    : [];
+  const childCategories = subs
+    .map((s) => (typeof s?.category === 'string' && s.category !== '' ? s.category : undefined))
+    .filter((c): c is string => c !== undefined);
+
+  const category = given('category');
+  const account = given('account');
+  const payee = given('payee');
+  if (category === undefined && account === undefined && payee === undefined && childCategories.length === 0) {
+    return fields;
+  }
+
+  const listing = <T>(kind: DrainListingKind, fetch: () => Promise<T>): Promise<T> =>
+    withConcurrency(() => retry(() => readDrainListing(kind, fetch), { retries: 2, backoffMs: 200 }));
+
+  // A split's CHILD categories are checked with the parent's, against the same memoised listing.
+  // Leaving them out would have made the check trivially avoidable: the same wrong id written
+  // through `subtransactions` instead of `fields.category`.
+  const wantedCategories = category !== undefined ? [category, ...childCategories] : childCategories;
+  if (wantedCategories.length > 0) {
+    const rows = await listing('categories', () => rawGetCategories() as Promise<NamedRow[]>);
+    for (const value of wantedCategories) {
+      await resolveFilterId('category', value, { verifyExists: true, rows });
+    }
+  }
+
+  if (account !== undefined) {
+    const rows = await listing('accounts', () => rawGetAccounts() as Promise<NamedRow[]>);
+    await resolveFilterId('account', account, { verifyExists: true, rows });
+  }
+
+  if (payee === undefined) return fields;
+  const payeeRows = await listing('payees', () => rawGetPayees() as Promise<NamedRow[]>);
+  const resolvedPayee = await resolveFilterId('payee', payee, { acceptsName: true, rows: payeeRows });
+  // Copy only when the value actually changed, so an id-shaped payee reaches the raw call as the
+  // very same object the caller passed.
+  return resolvedPayee === payee ? fields : { ...supplied, payee: resolvedPayee };
+}
+
 export async function updateTransaction(id: string, fields: Partial<components['schemas']['Transaction']> | unknown): Promise<void> {
   observability.incrementToolCall('actual.transactions.update').catch(() => {});
   // Use write queue to batch concurrent updates in a single budget session
@@ -2174,7 +2276,11 @@ export async function updateTransaction(id: string, fields: Partial<components['
       }
     }
 
-    await withConcurrency(() => retry(() => rawUpdateTransaction(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // The ids INSIDE fields, checked in the SAME queued operation as the write (the #429
+    // convention), so nothing can create or remove a category between the check and the write.
+    const resolvedFields = await resolveTransactionFieldIds(fields);
+
+    await withConcurrency(() => retry(() => rawUpdateTransaction(id, resolvedFields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
   });
 }
 export async function updateTransactionBatch(
@@ -2215,8 +2321,13 @@ export async function updateTransactionBatch(
         continue;
       }
       try {
+        // Inside the per-item try ON PURPOSE: a refusal for one item's category or payee is a
+        // per-item failure like any other here, not a reason to abandon the other 49. The
+        // listings it reads are memoised for the whole drain, so this is one read per entity
+        // kind for the batch, not one per item.
+        const resolvedFields = await resolveTransactionFieldIds(fields);
         await withConcurrency(() =>
-          retry(() => rawUpdateTransaction(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError })
+          retry(() => rawUpdateTransaction(id, resolvedFields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError })
         );
         succeeded.push({ id });
       } catch (err) {
@@ -2418,9 +2529,69 @@ export async function getRules(): Promise<unknown[]> {
     return Array.isArray(raw) ? raw : [];
   });
 }
+/**
+ * Verify that every entity id a rule refers to actually EXISTS, before the rule is written.
+ *
+ * The three rule tools already reject a value that is not UUID-shaped, which answers a weaker
+ * question than the one that matters. `db.insertRule`/`db.updateRule` store the id they are
+ * handed without looking it up, so a well-formed id belonging to nothing is accepted, reported
+ * as success, and produces a rule that quietly matches nothing (a condition) or assigns a
+ * category no listing returns (an action). `docs/audit/write-effect-audit.md` has carried
+ * "trace for an unvalidated payee or category in conditions and actions" as an open UNKNOWN for
+ * `actual_rules_create` since the 2026-08-25 pass; this is that trace, and the fix.
+ *
+ * ONE listing per entity KIND for the whole rule, via `readDrainListing`: a rule with a
+ * ten-category `oneOf` pays one categories read, not ten. `resolveFilterId` is handed those rows
+ * explicitly so it never issues its own `withActualApi` read from inside the write queue.
+ *
+ * Refusals name WHERE the bad id was (`conditions[1].value`), because a rule commonly carries
+ * several ids of different kinds and "Category ... not found" alone does not say which one.
+ */
+async function verifyRuleEntityIds(rule: unknown): Promise<void> {
+  const ids = collectRuleEntityIds(rule);
+  if (ids.length === 0) return;
+
+  const listings: Partial<Record<FilterIdKind, readonly NamedRow[]>> = {};
+  const rowsFor = async (kind: FilterIdKind): Promise<readonly NamedRow[]> => {
+    const cached = listings[kind];
+    if (cached) return cached;
+    const fetched = await withConcurrency(() =>
+      retry(
+        () =>
+          readDrainListing(
+            kind === 'account' ? 'accounts' : kind === 'category' ? 'categories' : 'payees',
+            () =>
+              (kind === 'account' ? rawGetAccounts() : kind === 'category' ? rawGetCategories() : rawGetPayees()) as Promise<NamedRow[]>,
+          ),
+        { retries: 2, backoffMs: 200 },
+      ),
+    );
+    listings[kind] = fetched;
+    return fetched;
+  };
+
+  for (const { kind, value, where } of ids) {
+    try {
+      await resolveFilterId(kind, value, { verifyExists: true, rows: await rowsFor(kind) });
+    } catch (error) {
+      if (isPreflightRefusal(error)) {
+        throw new NotFoundRefusal(
+          FILTER_ID_ENTITIES[kind].entity,
+          value,
+          FILTER_ID_ENTITIES[kind].listTool,
+          undefined,
+          `${error.message} (rule ${where})`,
+        );
+      }
+      throw error;
+    }
+  }
+}
+
 export async function createRule(rule: unknown): Promise<string> {
   observability.incrementToolCall('actual.rules.create').catch(() => {});
   return queueWriteOperation(async () => {
+    await verifyRuleEntityIds(rule);
     const raw = await withConcurrency(() => retry(() => rawCreateRule(rule) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
     const id = normalizeToId(raw);
     return id;
@@ -2461,7 +2632,14 @@ export async function updateRule(id: string, fields: unknown): Promise<void> {
     };
     
     logger.debug(`[UPDATE RULE] Updating rule ${id} with merged fields: ${JSON.stringify(rule)}`);
-    
+
+    // Checked against what the CALLER SUPPLIED (`fieldsObj`), not against the merged rule.
+    // Merging pulls the stored rule's other half back in, and refusing an update because an id
+    // that was already in the rule no longer resolves would block the very edit that fixes it:
+    // "change this rule's action" would fail forever because its condition names a payee someone
+    // deleted last month. The caller is answerable for the ids they pass, and only those.
+    await verifyRuleEntityIds(fieldsObj);
+
     await withConcurrency(() => retry(() => rawUpdateRule(rule) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
     logger.debug(`[UPDATE RULE] Update completed for rule ${id}`);
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
@@ -2501,6 +2679,11 @@ export async function upsertRule(
     const matchedRule = findMatchingRule(existingRules, input.conditions, input.conditionsOp);
 
     const ruleData = JSON.parse(JSON.stringify(input)); // deep clone for the API call
+
+    // Same check both branches get in createRule/updateRule, and it runs BEFORE either: this
+    // tool's whole point is idempotence, so an unresolvable id must not create a rule on the
+    // first call and then be refused on the second.
+    await verifyRuleEntityIds(ruleData);
 
     if (matchedRule) {
       // The Actual Budget API expects the FULL merged rule object as one argument.
@@ -3772,6 +3955,69 @@ export async function getServerVersion(): Promise<{ version: string } | { error:
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * Account groups (#429). Upstream added these in 26.9.0; the schema arrives through a
+ * migration SHIPPED IN `@actual-app/api` and applied to the LOCAL budget file, so these
+ * work against an older sync server too: the server relays messages and does not execute
+ * the queries.
+ *
+ * One semantic worth carrying into the tool descriptions, taken from upstream's own
+ * comment on the delete path: clearing member refs is best effort under CRDT sync, so a
+ * concurrent assignment on another device can win against those nulls. Consumers must
+ * treat an account whose `account_group_id` points at a missing or tombstoned group as
+ * UNGROUPED rather than as an error.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function getAccountGroups(): Promise<any[]> {
+  return withActualApi(async () => {
+    observability.incrementToolCall('actual.account_groups.list').catch(() => {});
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return await withConcurrency(() => retry(() => rawGetAccountGroups() as Promise<any[]>, { retries: 2, backoffMs: 200 }));
+  });
+}
+
+export async function createAccountGroup(group: { name: string; sort_order?: number }): Promise<string> {
+  observability.incrementToolCall('actual.account_groups.create').catch(() => {});
+  return queueWriteOperation(async () => {
+    const raw = await withConcurrency(() => retry(() => rawCreateAccountGroup(group) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
+    return normalizeToId(raw);
+    // Lands in account_groups only, so the four entity listings are untouched.
+  }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
+}
+
+export async function updateAccountGroup(id: string, fields: { name?: string; sort_order?: number }): Promise<void> {
+  observability.incrementToolCall('actual.account_groups.update').catch(() => {});
+  return queueWriteOperation(async () => {
+    // Read, decide and write inside ONE queued operation, so the existence check and the
+    // write are a single api-lock cycle and cannot be interleaved by a sibling (#371/#378).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const groups = await withConcurrency(() => retry(() => rawGetAccountGroups() as Promise<any[]>, { retries: 2, backoffMs: 200 }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (!(groups as any[]).some((g: any) => g.id === id)) {
+      throw new NotFoundRefusal('Account group', id, 'actual_account_groups_list');
+    }
+    await withConcurrency(() => retry(() => rawUpdateAccountGroup(id, fields) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // Renames the group row itself; no account row changes, so listings are preserved.
+  }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
+}
+
+export async function deleteAccountGroup(id: string): Promise<void> {
+  observability.incrementToolCall('actual.account_groups.delete').catch(() => {});
+  return queueWriteOperation(async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const groups = await withConcurrency(() => retry(() => rawGetAccountGroups() as Promise<any[]>, { retries: 2, backoffMs: 200 }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (!(groups as any[]).some((g: any) => g.id === id)) {
+      throw new NotFoundRefusal('Account group', id, 'actual_account_groups_list');
+    }
+    await withConcurrency(() => retry(() => rawDeleteAccountGroup(id) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
+    // NO preservesListings claim, deliberately: upstream's delete UPDATES every member
+    // account to null its account_group_id before removing the group, so the accounts
+    // listing CONTENT changes even though its id set does not. Claiming preservation here
+    // would serve a stale accounts listing to the next guard in the same drain.
+  });
+}
+
 export async function getTags(): Promise<any[]> {
   return withActualApi(async () => {
     observability.incrementToolCall('actual.tags.get').catch(() => {});
@@ -4029,6 +4275,10 @@ export default {
   getPayees,
   getCommonPayees,
   createPayee,
+  getAccountGroups,
+  createAccountGroup,
+  updateAccountGroup,
+  deleteAccountGroup,
   getTags,
   createTag,
   updateTag,

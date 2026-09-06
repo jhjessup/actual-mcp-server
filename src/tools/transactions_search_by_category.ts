@@ -3,7 +3,7 @@ import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 
 const InputSchema = z.object({
-  categoryName: z.string().optional().describe('Name of the category to search for (e.g., "Food", "Rent", "Transportation") - optional for smoke tests'),
+  categoryName: z.string().optional().describe('Name of the category to search for (e.g., "Food", "Rent", "Transportation"), or its UUID. A name that matches more than one category is refused with the candidate ids - optional for smoke tests'),
   startDate: z.string().optional().describe('Optional: Start date in YYYY-MM-DD format'),
   endDate: z.string().optional().describe('Optional: End date in YYYY-MM-DD format'),
   accountId: z.string().optional().describe('Optional: Filter by specific account ID'),
@@ -31,26 +31,24 @@ const tool: ToolDefinition = {
       await adapter.resolveFilterId('account', input.accountId, { verifyExists: true, rows: allAccounts });
     }
 
-    // Step 1: Find category ID by name
+    // Step 1: Find category ID by name.
+    //
+    // #388 routed this tool's `accountId` through the shared resolver two lines above and left
+    // `categoryName` on the hand-rolled `.find()` it had always used, so ONE tool answered the
+    // same class of question two ways. The hand-rolled version had both of the failures #388
+    // exists to remove: an unknown name returned `{transactions: [], count: 0, error}`, which a
+    // model reads as "no transactions in that category" rather than as an error, and a duplicate
+    // name silently took the first match with nothing said about the second (Actual permits the
+    // same category name in two groups, so that is a real budget, not a corner case).
+    //
+    // `acceptsName` rather than the plain refusal the sibling `accountId` gets: this field is
+    // called `categoryName` and is documented as one, so resolving is the contract. Only the
+    // failures change — unknown refuses, and ambiguous refuses with every candidate id.
     let categoryId: string | undefined;
     if (input.categoryName) {
-      const categories = await adapter.getCategories();
-      const category = categories.find((c: any) => 
-        c.name && c.name.toLowerCase() === input.categoryName!.toLowerCase()
-      );
-      if (!category) {
-        // Category not found - return empty result
-        return {
-          transactions: [],
-          count: 0,
-          totalAmount: 0,
-          categoryName: input.categoryName,
-          error: `Category "${input.categoryName}" not found`,
-        };
-      }
-      categoryId = category.id;
+      categoryId = await adapter.resolveFilterId('category', input.categoryName, { acceptsName: true });
     }
-    
+
     // Step 2: Get base transactions (filtered by account and date range if provided)
     // getTransactions() requires an accountId — when none is provided, fetch from all accounts.
     // Exclude off-budget accounts (issue #81) — their transactions cannot have categories set;

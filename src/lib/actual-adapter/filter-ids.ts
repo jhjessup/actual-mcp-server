@@ -32,10 +32,19 @@ import { UUID_PATTERN } from '../constants.js';
 /** The entity kinds that can appear as an optional filter id. */
 export type FilterIdKind = 'account' | 'category' | 'category_group' | 'payee';
 
-/** A row from one of the four listings (account, category, category_group, payee), narrowed to what name matching needs. */
+/**
+ * A row from one of the four listings (account, category, category_group, payee), narrowed to
+ * what name matching needs.
+ *
+ * `group_id` is here for the AMBIGUITY message only. It is the one field already present on a
+ * category row that distinguishes two same-named categories, so reporting it costs no extra
+ * listing read; every other candidate-distinguishing idea (the group's NAME, an account's
+ * balance) would.
+ */
 export interface NamedRow {
   id?: string | null;
   name?: string | null;
+  group_id?: string | null;
 }
 
 /** Human-readable entity name and the tool that lists it, for the refusal message. */
@@ -64,21 +73,26 @@ export function isEntityId(value: string): boolean {
 }
 
 /**
- * Find the row whose NAME is what the caller passed.
+ * Find EVERY row whose NAME is what the caller passed.
  *
- * Case-insensitive and trimmed, matching the accommodation this generalises. Returns undefined
- * rather than throwing so the caller decides between "resolved" and "no such name", which are
- * two different messages.
+ * Case-insensitive and trimmed, matching the accommodation this generalises. Returns a (possibly
+ * empty) array rather than throwing so the caller decides between "no such name", "resolved" and
+ * "ambiguous", which are three different messages.
  *
- * Ambiguity is resolved by taking the FIRST match, deliberately. Actual permits two categories
- * with the same name in different groups, so a name is not a key. Reporting the first is still
- * strictly better than the empty result set this replaces, and the message names the id it
- * chose, so a caller who meant the other one can see that it is not theirs.
+ * THIS USED TO RETURN THE FIRST MATCH ONLY, and the reason it no longer does is worth keeping.
+ * #388 argued that reporting the first was "strictly better than the empty result set this
+ * replaces", which was true of the change it was making and is not an argument that the first
+ * match is the RIGHT answer. Actual permits two categories with the same name in different
+ * groups, so a name is not a key; when it matches twice, naming one id and hedging with "if that
+ * is not the category you meant" hands a model a specific id and a vague doubt, and a model
+ * resolves that by using the id. The candidates are already in `rows` — the listing has been read
+ * — so disclosing them costs nothing that has not already been paid for, and it is the only
+ * answer that does not silently pick for the caller.
  */
-export function matchByName<T extends NamedRow>(rows: readonly T[], value: string): T | undefined {
+export function matchesByName<T extends NamedRow>(rows: readonly T[], value: string): T[] {
   const wanted = value.trim().toLowerCase();
-  if (wanted === '') return undefined;
-  return rows.find((r) => typeof r.name === 'string' && r.name.trim().toLowerCase() === wanted);
+  if (wanted === '') return [];
+  return rows.filter((r) => typeof r.name === 'string' && r.name.trim().toLowerCase() === wanted);
 }
 
 /**
@@ -100,5 +114,30 @@ export function resolvedNameDetail(kind: FilterIdKind, name: string, id: string)
   return (
     `"${name}" is ${article} ${noun} NAME, not an id. Use "${id}" instead ` +
     `(${listTool} lists them if that is not the ${noun} you meant).`
+  );
+}
+
+/**
+ * The refusal text for a name that matched MORE THAN ONE row.
+ *
+ * It refuses WITHOUT naming a winner, on purpose. `resolvedNameDetail` above can say "use this
+ * id" because there is only one; here any single id would be a guess presented as an answer, and
+ * the caller (a model, usually) cannot tell a guess from a lookup. So the message states the
+ * count, lists every candidate with whatever the row itself distinguishes it by, and asks for an
+ * id back.
+ *
+ * The candidates are NOT truncated. A name matching more than a handful of rows is not a case
+ * that occurs in a real budget, and a truncated list is the one shape that could hide the very
+ * row the caller wanted while still reading as complete.
+ */
+export function ambiguousNameDetail(kind: FilterIdKind, name: string, matches: readonly NamedRow[]): string {
+  const { entity, listTool } = FILTER_ID_ENTITIES[kind];
+  const noun = entity.toLowerCase();
+  const candidates = matches
+    .map((m) => (m.group_id ? `"${m.id}" (group ${m.group_id})` : `"${m.id}"`))
+    .join(', ');
+  return (
+    `"${name}" matches ${matches.length} ${noun} records, so it does not identify one: ${candidates}. ` +
+    `Pass the id of the one you mean (${listTool} shows what distinguishes them).`
   );
 }

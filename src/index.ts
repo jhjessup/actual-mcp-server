@@ -242,9 +242,29 @@ export {};
   const useTestMcpClient = args.includes('--test-mcp-client');
 
   const SERVER_DESCRIPTION = 'Bridge MCP server exposing Actual finance API to LibreChat.';
+  // MCP `instructions` is the ONE string a client puts in front of the model for the whole
+  // session, before any tool call. It used to spend that budget on marketing ("Welcome to the
+  // Actual MCP server... as we expand coverage, more tools will be officially exposed"), which
+  // is a release note: it tells the model nothing it can act on, and the sentence about proxying
+  // "any API call supported by Actual" is not even true of the published surface.
+  //
+  // What it says now is the three habits that actually prevent wrong writes against a budget,
+  // each of which a per-tool description cannot establish because it is a habit ACROSS calls.
+  // Deliberately short. This is a nudge that competes for attention with the client's own system
+  // prompt, not documentation; the tool descriptions carry the per-call detail.
   const SERVER_INSTRUCTIONS =
-    'Welcome to the Actual MCP server. The tools listed here are only the ones currently confirmed and tested, ' +
-    'but the server can proxy any API call supported by Actual. As we expand coverage, more tools will be officially exposed.';
+    'This server reads and writes a real Actual Budget file. Three rules:\n' +
+    '1. Fetch before you state. Balances, categories, payees and transactions change outside this ' +
+    'conversation, so re-read them with the relevant tool before asserting a fact about them, and ' +
+    'never answer from something said earlier in the conversation.\n' +
+    '2. Never invent an id. Every account, category, payee, rule and transaction id must come from ' +
+    'the tool that lists them (actual_accounts_list, actual_categories_get, actual_payees_get, ' +
+    'actual_rules_get, actual_transactions_get). Do not construct, abbreviate, complete or recall ' +
+    'one; if you are unsure a name is unique, resolve it with actual_entities_search, which reports ' +
+    'every match rather than picking one.\n' +
+    '3. Confirm the set before a bulk write. When an instruction describes transactions by a pattern ' +
+    'rather than by id, list exactly which ones match and get agreement before updating or deleting ' +
+    'them. A wrong bulk edit here is not undone by a follow-up message.';
 
   async function main() {
     // Mutual exclusion — stdio and http are incompatible transports

@@ -16,14 +16,23 @@ import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 import { CommonSchemas } from '../lib/schemas/common.js';
 
+// The nested `fields.*` entity ids are typed for the same reason as in transactions_update.ts
+// (read the comment there): they are PAYLOAD ids on a write, and an unchecked one is stored as
+// given and reported as success. This tool is the higher-risk of the two, because the mistake it
+// invites is bulk: 50 transactions moved to one category id that does not exist.
 const FieldsSchema = z.object({
-  account: z.string().nullable().optional().describe('Account ID'),
+  account: CommonSchemas.accountId.nullable().optional()
+    .describe('Account ID (UUID) to move the transaction to. Must come from actual_accounts_list; never construct or guess one.'),
   date: z.string().nullable().optional().describe('Transaction date (YYYY-MM-DD)'),
   amount: z.number().nullable().optional().describe('Amount in cents (e.g., -1000 = -$10.00)'),
-  payee: z.string().nullable().optional().describe('Payee ID'),
+  // Left permissive on purpose, matching transactions_update: "id or name" is this field's
+  // published contract, and the adapter resolves it rather than refusing a name.
+  payee: z.string().nullable().optional()
+    .describe('Payee ID (UUID, from actual_payees_get) or an exact payee name. A name that matches more than one payee is refused; pass the id in that case.'),
   payee_name: z.string().nullable().optional().describe('Payee name (alternative to payee ID)'),
   imported_payee: z.string().nullable().optional().describe('Original imported payee name'),
-  category: z.string().nullable().optional().describe('Category ID'),
+  category: CommonSchemas.categoryId.nullable().optional()
+    .describe('Category ID (UUID). Must come from actual_categories_get; never construct or guess one. Pass null to uncategorise.'),
   notes: z.string().nullable().optional().describe('Transaction notes'),
   cleared: z.boolean().nullable().optional().describe('Whether transaction is cleared'),
 });
@@ -51,6 +60,8 @@ type BatchResult = {
 const tool: ToolDefinition = {
   name: 'actual_transactions_update_batch',
   description: `Update multiple transactions in a single call. Accepts up to 50 {id, fields} pairs. Each update is applied independently: partial failures are reported per-item so you know exactly which succeeded and which failed. Splits are not supported here: a subtransactions field is ignored in batch. Use actual_transactions_update to edit an existing split's children.
+
+fields.category and fields.account are UUIDs that must come from a prior actual_categories_get / actual_accounts_list call. An id you constructed, abbreviated or recalled from earlier in the conversation is refused, not silently written — which matters most here, where one wrong id is applied to every item in the batch.
 
 Returns: { succeeded: [{id}], failed: [{id, error}], total, successCount, failureCount }
 

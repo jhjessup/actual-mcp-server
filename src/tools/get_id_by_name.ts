@@ -25,6 +25,8 @@ Allowed types: 'accounts', 'schedules', 'categories', 'payees'
 
 Returns the UUID string for the matching entity.
 
+AMBIGUITY WARNING: this delegates to Actual's own server-side get-id-by-name, which returns the FIRST match and says nothing about any others. Actual permits two categories with the same name in different groups, and duplicate payee names, so a name that is not unique resolves here to one id with no signal that another exists. When the name might not be unique, and always when the answer will be used to WRITE, prefer actual_entities_search: it reports every match rather than picking one. actual_categories_get / actual_payees_get / actual_accounts_list list them in full.
+
 Examples:
 - Find the ID for an account named "Checking Account"
 - Find the ID for a category named "Groceries"

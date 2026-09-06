@@ -67,13 +67,29 @@ describe('the pure half: what counts as an id, and what counts as a name');
   check(!pure.isEntityId(''), 'the empty string is not an id');
 
   const rows = [{ id: ACC, name: 'Checking' }, { id: ABSENT, name: 'Savings' }];
-  check(pure.matchByName(rows, 'checking')?.id === ACC, 'name matching is case-insensitive');
-  check(pure.matchByName(rows, '  Checking  ')?.id === ACC, 'and trims, because a model pastes whitespace');
-  check(pure.matchByName(rows, 'Nothing') === undefined, 'an unknown name matches nothing');
+  check(pure.matchesByName(rows, 'checking')[0]?.id === ACC, 'name matching is case-insensitive');
+  check(pure.matchesByName(rows, '  Checking  ')[0]?.id === ACC, 'and trims, because a model pastes whitespace');
+  check(pure.matchesByName(rows, 'Nothing').length === 0, 'an unknown name matches nothing');
   // The empty string must never match a row with a blank or missing name, or a caller who sent
   // nothing at all would be told they meant some arbitrary entity.
-  check(pure.matchByName([{ id: ACC, name: '' }, { id: ABSENT }], '') === undefined,
+  check(pure.matchesByName([{ id: ACC, name: '' }, { id: ABSENT }], '').length === 0,
     'the empty string never matches, even against a blank name');
+
+  // It returns EVERY match, not the first. This used to be `matchByName`, returning one row,
+  // and #388 justified that as "strictly better than the empty result set this replaces" —
+  // true of the change it was making, and not an argument that the first row is the right
+  // answer. Actual permits two categories with the same name in different groups.
+  const dupes = [
+    { id: CAT, name: 'Gifts', group_id: 'grp-giving' },
+    { id: ABSENT, name: 'gifts', group_id: 'grp-fun' },
+  ];
+  check(pure.matchesByName(dupes, 'Gifts').length === 2, 'a duplicated name reports BOTH rows, not the first');
+
+  const detail = pure.ambiguousNameDetail('category', 'Gifts', dupes);
+  check(detail.includes(CAT) && detail.includes(ABSENT), 'the ambiguity message names every candidate id');
+  check(detail.includes('grp-giving') && detail.includes('grp-fun'),
+    'and what distinguishes them, from the rows already in hand (no extra listing read)');
+  check(!/Use "/.test(detail), 'and does NOT pick one: naming a winner here would be a guess presented as an answer');
 }
 
 // --- property 1: the happy path is free --------------------------------------
@@ -142,6 +158,46 @@ describe('verifyExists is asymmetric on purpose, so both halves are pinned');
   const supplied = await attempt(() => adapter.resolveFilterId('account', ACC, { verifyExists: true, rows }));
   check(supplied.ok && supplied.value === ACC, 'a supplied listing is used');
   check(reads.accounts === 0, `and no second read is paid (accounts read ${reads.accounts} times)`);
+}
+
+// --- property 4: an AMBIGUOUS name is refused with every candidate -----------
+describe('a name that matches twice identifies neither, and says so');
+{
+  const OTHER = 'bbbbbbbb-0000-4000-8000-000000000022';
+  const dupes = [
+    { id: CAT, name: 'Gifts', group_id: 'grp-giving' },
+    { id: OTHER, name: 'Gifts', group_id: 'grp-fun' },
+  ];
+  const r = await attempt(() => adapter.resolveFilterId('category', 'Gifts', { rows: dupes }));
+  check(!r.ok && isPreflightRefusal(r.error), 'an ambiguous name is refused, not resolved to the first row');
+  check(!r.ok && r.error.message.includes(CAT) && r.error.message.includes(OTHER),
+    'and the refusal names BOTH candidates');
+
+  // The same under acceptsName. Resolving a name is a licence to look one up, not to choose
+  // between two, and this is the case where a silent first-match would actually write.
+  const named = await attempt(() => adapter.resolveFilterId('category', 'Gifts', { acceptsName: true, rows: dupes }));
+  check(!named.ok && isPreflightRefusal(named.error),
+    'acceptsName does NOT downgrade an ambiguous name to the first match');
+}
+
+// --- property 5: acceptsName, for the fields whose contract IS a name --------
+describe('acceptsName resolves a name and still checks an id');
+{
+  reads = { accounts: 0, categories: 0, payees: 0 };
+  const byName = await attempt(() => adapter.resolveFilterId('category', 'Food', { acceptsName: true }));
+  check(byName.ok && byName.value === CAT, 'an unambiguous name resolves to its id instead of refusing');
+
+  const byId = await attempt(() => adapter.resolveFilterId('category', CAT, { acceptsName: true }));
+  check(byId.ok && byId.value === CAT, 'an id that exists passes through');
+
+  // The whole reason acceptsName does not take the free fast path: these callers USE the value,
+  // so an unchecked id is the silent-empty-result this resolver exists to remove.
+  const ghost = await attempt(() => adapter.resolveFilterId('category', ABSENT, { acceptsName: true }));
+  check(!ghost.ok && isPreflightRefusal(ghost.error), 'a well-formed id that names nothing is still refused');
+
+  const unknown = await attempt(() => adapter.resolveFilterId('payee', 'NoSuchPayee', { acceptsName: true }));
+  check(!unknown.ok && isPreflightRefusal(unknown.error), 'an unknown name is still refused');
+  check(!unknown.ok && /actual_payees_get/.test(unknown.error.message), 'and still names the listing tool');
 }
 
 log(`\n[#388-filter-ids] ${passed} passed, ${failed} failed`);

@@ -1,7 +1,7 @@
 # Security & Privacy
 
 **Project:** Actual MCP Server  
-**Version:** 0.19.4  
+**Version:** 0.21.0  
 **Purpose:** Define security policies, privacy practices, and incident response  
 **Last Updated:** 2026-06-07
 
@@ -20,6 +20,16 @@ This document establishes **security policies and privacy practices** for the Ac
 #### 1. **Bearer Token Authentication**
 
 **Status**: ✅ Implemented and recommended
+
+**Both methods on the MCP path are gated (#447).** POST and GET (the SSE stream)
+now run the same `authenticateRequest` check. Before #447 only POST called it in
+the default static-bearer posture, so a GET on the identical path was
+unauthenticated. The practical exposure was small, because that route returned
+constants and a stream keyed by a 122-bit server-generated session id, but the
+inconsistency blocked reporting a session's init failure there (#438) and is the
+kind of gap that becomes a hole the moment a more informative response is added.
+**This is a behaviour change**: an SSE client that connected without a token
+previously received a 400 and now receives a 401.
 
 **How it works**:
 ```yaml

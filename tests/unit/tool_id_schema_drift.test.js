@@ -91,11 +91,17 @@ const EXCEPTIONS = {
   'actual_transactions_import:txs.[].imported_id': "the bank's own identifier; shape is the aggregator's",
   'actual_transactions_update:fields.imported_id': "the bank's own identifier; shape is the aggregator's",
 
-  // A nested value inside `fields`, alongside `account` and `category`, which are entity ids
-  // too but are not id-SHAPED by name so this guard never sees them. Tightening one of the
-  // three and not the others would be worse than tightening none. Decide the `fields.*`
-  // group together, with Category B.
-  'actual_transactions_update:fields.transfer_id': 'nested fields.* payload id; decide with Category B',
+  // `actual_transactions_update:fields.transfer_id` USED TO BE HERE, deferred as "decide the
+  // `fields.*` group together, with Category B". That group is now decided, and the entry is
+  // gone rather than reworded: `fields.account`, `fields.category` and `fields.transfer_id` are
+  // all typed against CommonSchemas. A payload id on a WRITE is not the Category B case (an
+  // optional filter, where a loose schema buys a better message than a ZodError can) — it is
+  // stored as given and reported as success, so the wrong id becomes a wrong row.
+  //
+  // `fields.payee` is the one member of the group that stays loose, and this guard never sees it
+  // because it is not id-SHAPED by name. It publishes "Payee ID or name", so a UUID schema would
+  // reject input the tool has always advertised; `adapter.resolveFilterId(..., acceptsName)`
+  // answers that one instead, and `transactions_update_field_ids.test.js` pins the behaviour.
 };
 
 /** Strip comments so an id-shaped name inside prose is not read as a schema field. */
@@ -160,8 +166,15 @@ function looseIdFields(published) {
     // `payees_merge.mergeIds` is the live example, and the previous source-regex detector
     // could not express this case at all.
     const target = sub?.type === 'array' && sub.items ? sub.items : sub;
+    // #448: a nullable string is `type: ["string","null"]` under zod 4.5 where 4.4 emitted
+    // `anyOf: [{type:"string"},{type:"null"}]`. Both forms must be recognised, and this is
+    // not cosmetic: without the type-array case the detector stops SEEING six fields, their
+    // EXCEPTIONS entries go stale, and the guard silently loses its grip on exactly the
+    // bare-string filter ids it was written to police.
+    const typeIsStringy = (t) => t === 'string' || (Array.isArray(t) && t.includes('string'));
     const isStringy =
-      target?.type === 'string' || (target?.anyOf ?? target?.oneOf ?? []).some((x) => x?.type === 'string');
+      typeIsStringy(target?.type) ||
+      (target?.anyOf ?? target?.oneOf ?? []).some((x) => typeIsStringy(x?.type));
     if (!isStringy) continue;
     if (!enforcesUuid(target)) out.push({ field: path, decl: JSON.stringify(target).slice(0, 70) });
   }

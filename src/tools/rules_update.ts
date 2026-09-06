@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
+// #380's lesson, applied to rules: FIELD_OPERATORS lived here, in rules_update.ts and in
+// rules_create_or_update.ts as three identical copies. It is now one map, shared with the
+// adapter's existence check, so shape validation and existence validation cannot disagree
+// about which fields hold an entity id.
+import { FIELD_OPERATORS } from '../lib/rule-fields.js';
 import { CommonSchemas } from '../lib/schemas/common.js';
 
 // Define the schema for rule conditions and actions (same as create)
@@ -18,18 +23,6 @@ const ActionSchema = z.object({
   type: z.string().optional().describe('Type of action (e.g., "id", "string", "number", "boolean")'),
   options: z.object({}).passthrough().optional().describe('Additional options for the action'),
 });
-
-// Operator validation map
-const FIELD_OPERATORS: Record<string, { type: string; operators: string[] }> = {
-  'imported_payee': { type: 'string', operators: ['contains', 'matches', 'doesNotContain', 'is', 'isNot'] },
-  'payee': { type: 'id', operators: ['is', 'isNot', 'oneOf', 'notOneOf'] },
-  'account': { type: 'id', operators: ['is', 'isNot', 'oneOf', 'notOneOf'] },
-  'category': { type: 'id', operators: ['is', 'isNot', 'oneOf', 'notOneOf'] },
-  'notes': { type: 'string', operators: ['contains', 'matches', 'doesNotContain', 'is', 'isNot'] },
-  'description': { type: 'string', operators: ['contains', 'matches', 'doesNotContain', 'is', 'isNot'] },
-  'amount': { type: 'number', operators: ['is', 'gte', 'lte', 'gt', 'lt', 'isapprox'] },
-  'date': { type: 'date', operators: ['is', 'gte', 'lte', 'gt', 'lt'] },
-};
 
 const InputSchema = z.object({
   id: CommonSchemas.ruleId.describe('Rule ID to update'),
