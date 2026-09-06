@@ -6,7 +6,16 @@ const InputSchema = z.object({ accountId: z.string().optional(), startDate: z.st
 
 const tool: ToolDefinition = {
   name: 'actual_transactions_get',
-  description: "Get all transactions for a specific account within a date range. Returns transaction details including date, amount (cents), payee, category, notes, and cleared status. Dates in YYYY-MM-DD format. Perfect for account reconciliation and spending analysis.",
+  // accountId is optional (see InputSchema above) and has been since this tool's introduction --
+  // omit it and every account's transactions in the date range come back together. The
+  // description used to read "Get all transactions for a specific account", which does not say
+  // that: it reads as accountId being expected, if not required, and nothing in the schema
+  // corrects that impression (Zod's `.optional()` doesn't surface as prose to a model deciding
+  // which arguments to supply). A caller who takes the description at face value always supplies
+  // an accountId, gets a correctly-scoped single-account answer, and has no way to know from this
+  // tool alone that a broader one was ever on the table -- indistinguishable from "that's all
+  // there is" unless they already know to omit the field. Spelled out explicitly below instead.
+  description: "Get transactions within a date range. Pass accountId to scope to one account, or omit it to get every account's transactions in the range together. Returns transaction details including date, amount (cents), payee, category, notes, and cleared status. Dates in YYYY-MM-DD format. Perfect for account reconciliation and spending analysis.",
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});
