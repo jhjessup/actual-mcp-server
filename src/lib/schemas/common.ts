@@ -18,6 +18,21 @@ import {
 // ============================================================================
 // ID SCHEMAS
 // ============================================================================
+//
+// EVERY id description names the ONE tool the id may come from, and says not to invent one.
+// That is not decoration: `.describe()` is published in the JSON Schema and is the only part of
+// the contract a model reads before it calls. The UUID regex below already refuses a NAME, and
+// it cannot refuse the failure that actually happens — a well-formed id produced from a
+// half-remembered earlier answer, or from a different budget. Nothing at the schema layer can
+// tell that apart from a real one, so the schema's job is to say where an id must come from,
+// and the adapter's job is to check that the one it was handed exists (`resolveFilterId`,
+// `updateCategory`'s pre-flight, and their siblings).
+//
+// The wording is repeated per-schema rather than factored into a shared suffix ON PURPOSE: each
+// names a DIFFERENT listing tool, and that specific tool name is the actionable half. It is kept
+// to one sentence for a second reason: `formatZodError` echoes a field's describe() into the
+// validation message (#206), so a paragraph here becomes a paragraph in every error about that
+// field.
 
 /**
  * Account UUID validation
@@ -26,7 +41,7 @@ import {
 export const accountIdSchema = z
   .string()
   .regex(UUID_PATTERN, 'Invalid account ID format (expected UUID)')
-  .describe('Account UUID');
+  .describe('Account UUID. Must come from a prior actual_accounts_list call; never construct, abbreviate or guess one.');
 
 /**
  * Transaction UUID validation
@@ -44,7 +59,7 @@ export const transactionIdSchema = z
 export const categoryIdSchema = z
   .string()
   .regex(UUID_PATTERN, 'Invalid category ID format (expected UUID)')
-  .describe('Category UUID');
+  .describe('Category UUID. Must come from a prior actual_categories_get call; never construct, abbreviate or guess one.');
 
 /**
  * Category group UUID validation
@@ -53,7 +68,7 @@ export const categoryIdSchema = z
 export const categoryGroupIdSchema = z
   .string()
   .regex(UUID_PATTERN, 'Invalid category group ID format (expected UUID)')
-  .describe('Category group UUID; list with actual_category_groups_get');
+  .describe('Category group UUID. Must come from a prior actual_category_groups_get call; never construct, abbreviate or guess one.');
 
 /**
  * Payee UUID validation
@@ -62,7 +77,7 @@ export const categoryGroupIdSchema = z
 export const payeeIdSchema = z
   .string()
   .regex(UUID_PATTERN, 'Invalid payee ID format (expected UUID)')
-  .describe('Payee UUID');
+  .describe('Payee UUID. Must come from a prior actual_payees_get call; never construct, abbreviate or guess one.');
 
 /**
  * Rule UUID validation
@@ -71,7 +86,7 @@ export const payeeIdSchema = z
 export const ruleIdSchema = z
   .string()
   .regex(UUID_PATTERN, 'Invalid rule ID format (expected UUID)')
-  .describe('Rule UUID');
+  .describe('Rule UUID. Must come from a prior actual_rules_get call; never construct, abbreviate or guess one.');
 
 /**
  * Tag UUID validation
