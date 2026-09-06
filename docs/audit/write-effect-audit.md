@@ -144,7 +144,9 @@ merely proposed. Where it says OPEN, the ticket exists and the behaviour is stil
 | `actual_account_groups_update` | adapter pre-check against `getAccountGroups()`, throwing `NotFoundRefusal`, in the SAME queued operation as the write (#429) |
 | `actual_account_groups_delete` | same adapter pre-check (#429). Note the delete is not purely its own table: upstream nulls `account_group_id` on every member account first, which is why it claims no listing preservation |
 | `actual_tags_update` | adapter throws `notFoundMsg('Tag', ...)` |
-| `actual_rules_update` | adapter throws `Rule with id <id> not found` |
+| `actual_rules_update` | adapter throws `Rule with id <id> not found`, and verifies every id-typed condition/action value the CALLER supplied against the real listings |
+| `actual_rules_create` | adapter verifies every id-typed condition and `set`-action value against the real listings before the write (`collectRuleEntityIds` in `src/lib/rule-fields.ts`), refusing with the offending `conditions[n].value` named |
+| `actual_rules_create_or_update` | the same check, run BEFORE the create-or-update branch is chosen, so an unresolvable id cannot create on the first call and refuse on the second |
 | `actual_payees_delete` (unknown id) | adapter pre-check against `getPayees()` |
 | `actual_budgets_setAmount` (unknown category) | adapter pre-check since #89 |
 | `actual_budgets_setCarryover` | upstream validates BOTH month and category |
@@ -195,8 +197,6 @@ something.
 | `actual_budget_updates_batch` | not traced; the one tool that calls raw api functions directly | trace whether a mid-batch failure leaves earlier writes applied |
 | `actual_categories_create` | not traced | trace for an unvalidated `group_id` (shape D) |
 | `actual_category_groups_create` | not traced | trace for a silent duplicate-name outcome |
-| `actual_rules_create` | not traced | trace for an unvalidated payee or category in conditions and actions |
-| `actual_rules_create_or_update` | not traced | same as `actual_rules_create`, plus the update branch |
 | `actual_payees_create` | not traced | trace for a silent merge into an existing payee |
 | `actual_tags_create` | not traced | trace for a silent no-op on a duplicate tag |
 | `actual_account_groups_create` | not traced | trace for a silent duplicate-name outcome, the same shape as `actual_category_groups_create`. Upstream sends `api/account-group-create` and returns an id; whether a duplicate name mints a second group or returns the existing one is unverified (#429) |

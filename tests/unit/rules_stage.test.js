@@ -50,6 +50,14 @@ const baseInput = (extra = {}) => ({
   apiDefault.updateRule = async (rule) => { updated = rule; return rule; };
   apiDefault.getRules = async () => existingRules;
   apiDefault.sync = async () => {};
+  // adapter.upsertRule now verifies that the entity ids a rule refers to actually EXIST before
+  // writing (a well-formed id belonging to nothing produced a rule that silently assigned a
+  // category no listing returns). The upsert cases below drive the REAL adapter, so CAT has to
+  // be a category this budget has; without this the fixture's action id resolves to nothing and
+  // the stage assertions fail for a reason that has nothing to do with stages.
+  apiDefault.getCategories = async () => [{ id: CAT, name: 'Test Category' }];
+  apiDefault.getAccounts = async () => [];
+  apiDefault.getPayees = async () => [];
   // The real adapter.updateRule (exercised in the last block) goes through the
   // write queue, which opens an Actual session. Stub the whole lifecycle so it
   // runs offline; without these it tries a real login and dies on invalid-password.

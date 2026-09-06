@@ -75,8 +75,9 @@ import { EventEmitter } from 'events';
 import observability from '../observability.js';
 import { retry, isRetryableError, isRateLimitError } from './retry.js';
 import { withOpTimeout } from './opTimeout.js';
-import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg } from './errors.js';
+import { NotFoundRefusal, OutOfRangeRefusal, constraintErrorMsg, isPreflightRefusal } from './errors.js';
 import { findMatchingRule, type RuleCondition } from './rule-matching.js';
+import { collectRuleEntityIds } from './rule-fields.js';
 import logger from '../logger.js';
 import { checkServerVersionOnce } from './server-version-guard.js';
 import config from '../config.js';
@@ -2528,9 +2529,69 @@ export async function getRules(): Promise<unknown[]> {
     return Array.isArray(raw) ? raw : [];
   });
 }
+/**
+ * Verify that every entity id a rule refers to actually EXISTS, before the rule is written.
+ *
+ * The three rule tools already reject a value that is not UUID-shaped, which answers a weaker
+ * question than the one that matters. `db.insertRule`/`db.updateRule` store the id they are
+ * handed without looking it up, so a well-formed id belonging to nothing is accepted, reported
+ * as success, and produces a rule that quietly matches nothing (a condition) or assigns a
+ * category no listing returns (an action). `docs/audit/write-effect-audit.md` has carried
+ * "trace for an unvalidated payee or category in conditions and actions" as an open UNKNOWN for
+ * `actual_rules_create` since the 2026-08-25 pass; this is that trace, and the fix.
+ *
+ * ONE listing per entity KIND for the whole rule, via `readDrainListing`: a rule with a
+ * ten-category `oneOf` pays one categories read, not ten. `resolveFilterId` is handed those rows
+ * explicitly so it never issues its own `withActualApi` read from inside the write queue.
+ *
+ * Refusals name WHERE the bad id was (`conditions[1].value`), because a rule commonly carries
+ * several ids of different kinds and "Category ... not found" alone does not say which one.
+ */
+async function verifyRuleEntityIds(rule: unknown): Promise<void> {
+  const ids = collectRuleEntityIds(rule);
+  if (ids.length === 0) return;
+
+  const listings: Partial<Record<FilterIdKind, readonly NamedRow[]>> = {};
+  const rowsFor = async (kind: FilterIdKind): Promise<readonly NamedRow[]> => {
+    const cached = listings[kind];
+    if (cached) return cached;
+    const fetched = await withConcurrency(() =>
+      retry(
+        () =>
+          readDrainListing(
+            kind === 'account' ? 'accounts' : kind === 'category' ? 'categories' : 'payees',
+            () =>
+              (kind === 'account' ? rawGetAccounts() : kind === 'category' ? rawGetCategories() : rawGetPayees()) as Promise<NamedRow[]>,
+          ),
+        { retries: 2, backoffMs: 200 },
+      ),
+    );
+    listings[kind] = fetched;
+    return fetched;
+  };
+
+  for (const { kind, value, where } of ids) {
+    try {
+      await resolveFilterId(kind, value, { verifyExists: true, rows: await rowsFor(kind) });
+    } catch (error) {
+      if (isPreflightRefusal(error)) {
+        throw new NotFoundRefusal(
+          FILTER_ID_ENTITIES[kind].entity,
+          value,
+          FILTER_ID_ENTITIES[kind].listTool,
+          undefined,
+          `${error.message} (rule ${where})`,
+        );
+      }
+      throw error;
+    }
+  }
+}
+
 export async function createRule(rule: unknown): Promise<string> {
   observability.incrementToolCall('actual.rules.create').catch(() => {});
   return queueWriteOperation(async () => {
+    await verifyRuleEntityIds(rule);
     const raw = await withConcurrency(() => retry(() => rawCreateRule(rule) as Promise<string | { id?: string }>, { retries: 2, backoffMs: 200, isRetryable: isRetryableError }));
     const id = normalizeToId(raw);
     return id;
@@ -2571,7 +2632,14 @@ export async function updateRule(id: string, fields: unknown): Promise<void> {
     };
     
     logger.debug(`[UPDATE RULE] Updating rule ${id} with merged fields: ${JSON.stringify(rule)}`);
-    
+
+    // Checked against what the CALLER SUPPLIED (`fieldsObj`), not against the merged rule.
+    // Merging pulls the stored rule's other half back in, and refusing an update because an id
+    // that was already in the rule no longer resolves would block the very edit that fixes it:
+    // "change this rule's action" would fail forever because its condition names a payee someone
+    // deleted last month. The caller is answerable for the ids they pass, and only those.
+    await verifyRuleEntityIds(fieldsObj);
+
     await withConcurrency(() => retry(() => rawUpdateRule(rule) as Promise<void>, { retries: 0, backoffMs: 200, isRetryable: isRetryableError }));
     logger.debug(`[UPDATE RULE] Update completed for rule ${id}`);
   }, { preservesListings: PRESERVES_ALL_ENTITY_LISTINGS });
@@ -2611,6 +2679,11 @@ export async function upsertRule(
     const matchedRule = findMatchingRule(existingRules, input.conditions, input.conditionsOp);
 
     const ruleData = JSON.parse(JSON.stringify(input)); // deep clone for the API call
+
+    // Same check both branches get in createRule/updateRule, and it runs BEFORE either: this
+    // tool's whole point is idempotence, so an unresolvable id must not create a rule on the
+    // first call and then be refused on the second.
+    await verifyRuleEntityIds(ruleData);
 
     if (matchedRule) {
       // The Actual Budget API expects the FULL merged rule object as one argument.
