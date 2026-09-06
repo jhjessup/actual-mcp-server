@@ -444,9 +444,14 @@ export async function startHttpServer(
       : { tools: toolsList.reduce((acc: Record<string, object>, n: string) => { acc[n] = {}; return acc; }, {}) };
 
   const serverOptions: Record<string, unknown> = {
-      // Provide instructions and capabilities so the SDK initialize response is correct
-      instructions: serverInstructions || "Welcome to the Actual MCP server.",
-      serverInstructions: { instructions: serverInstructions || "Welcome to the Actual MCP server." },
+      // Provide instructions and capabilities so the SDK initialize response is correct.
+      // The fallback used to be the marketing line "Welcome to the Actual MCP server.", which
+      // index.ts has now replaced with real session-level correctness guidance. A fallback that
+      // still shipped the old copy would quietly undo that on any path where the caller passed
+      // nothing, so it is the empty string instead: no instructions is honest, wrong
+      // instructions is not.
+      instructions: serverInstructions || "",
+      serverInstructions: { instructions: serverInstructions || "" },
       capabilities: capabilitiesObj,
       implementedTools: toolsList,
       // Include tools array explicitly so initialize result contains tools: string[]
@@ -872,8 +877,8 @@ export async function startHttpServer(
   const serverIp = process.env.MCP_BRIDGE_PUBLIC_HOST || getLocalIp();
   const mcpInfo = () => ({
     description: serverDescription || "Actual MCP server",
-    instructions: serverInstructions || "Welcome to the Actual MCP server.",
-    serverInstructions: { instructions: serverInstructions || "Welcome to the Actual MCP server." },
+    instructions: serverInstructions || "",
+    serverInstructions: { instructions: serverInstructions || "" },
     capabilities: capabilities && Object.keys(capabilities).length ? capabilities : { tools: toolsList.reduce((a: Record<string, object>, n: string) => ({ ...a, [n]: {} }), {}) },
     tools: toolsList,
     advertisedUrl: advertisedUrl || `${scheme}://${serverIp}:${port}${httpPath}`,
