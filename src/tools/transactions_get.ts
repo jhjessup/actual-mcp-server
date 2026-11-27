@@ -1,8 +1,14 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
+import { includeRawSyncedDataSchema, RAW_SYNCED_DATA_NOTE, shapeTransactionRows } from '../lib/transaction-fields.js';
 
-const InputSchema = z.object({ accountId: z.string().optional(), startDate: z.string().optional(), endDate: z.string().optional() });
+const InputSchema = z.object({
+  accountId: z.string().optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
+  includeRawSyncedData: includeRawSyncedDataSchema,
+});
 
 const tool: ToolDefinition = {
   name: 'actual_transactions_get',
@@ -15,7 +21,7 @@ const tool: ToolDefinition = {
   // an accountId, gets a correctly-scoped single-account answer, and has no way to know from this
   // tool alone that a broader one was ever on the table -- indistinguishable from "that's all
   // there is" unless they already know to omit the field. Spelled out explicitly below instead.
-  description: "Get transactions within a date range. Pass accountId to scope to one account, or omit it to get every account's transactions in the range together. Returns transaction details including date, amount (cents), payee, category, notes, and cleared status. Dates in YYYY-MM-DD format. Perfect for account reconciliation and spending analysis.",
+  description: "Get transactions within a date range. Pass accountId to scope to one account, or omit it to get every account's transactions in the range together. Returns transaction details including date, amount (cents), payee, category, notes, and cleared status. Dates in YYYY-MM-DD format. Perfect for account reconciliation and spending analysis. " + RAW_SYNCED_DATA_NOTE,
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});
@@ -27,7 +33,8 @@ const tool: ToolDefinition = {
     if (input.accountId) {
       await adapter.resolveFilterId('account', input.accountId, { verifyExists: true });
     }
-    const result = await adapter.getTransactions(input.accountId, input.startDate, input.endDate);
+    const rows = await adapter.getTransactions(input.accountId, input.startDate, input.endDate);
+    const result = Array.isArray(rows) ? shapeTransactionRows(rows, input.includeRawSyncedData) : rows;
     return { result };
   },
 };
