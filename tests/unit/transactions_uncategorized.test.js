@@ -19,6 +19,7 @@
  * 15.  Invalid accountId (non-UUID): refused by the handler since #388, not by Zod
  * 16.  Split parent exclusion — is_parent:true not in totalCount (issue #119)
  * 17.  Opening balance exclusion — starting_balance_flag:true not in totalCount (issue #119)
+ * 18.  raw_synced_data omitted from rows by default; kept with includeRawSyncedData:true
  *
  * Run via: npm run test:unit-js
  */
@@ -465,6 +466,38 @@ console.log('Running transactions_uncategorized unit tests');
       const res = await tool.call({});
       if (res?.totalCount !== 1) fail(`expected totalCount:1 (opening balance excluded), got ${res?.totalCount}`);
       else ok('opening balance excluded from totalCount');
+    } catch (e) {
+      fail(`unexpected error: ${e && e.message}`);
+    }
+  }
+
+  // Case 18: raw_synced_data omitted from rows by default, kept on opt-in
+  console.log('\n[Case 18] raw_synced_data omitted by default, kept with includeRawSyncedData:true');
+  {
+    const RAW = '{"payee":"ACME STORE #123","transactionId":"bank-1"}';
+    adapterMod.default.getTransactions = async () => [
+      { id: 'txn-raw', amount: -700, category: null, account: ACCT_A, date: '2026-04-01', imported_payee: 'ACME STORE #123', raw_synced_data: RAW },
+      { id: 'txn-plain', amount: -100, category: null, account: ACCT_A, date: '2026-04-02' },
+    ];
+    adapterMod.default.getAccounts = async () => [
+      { id: ACCT_A, name: 'Checking', offbudget: false, closed: false },
+    ];
+
+    try {
+      const res = await tool.call({ includeTransactions: true });
+      const row = res?.transactions?.find((t) => t.id === 'txn-raw');
+      if (!row) fail('txn-raw missing from default page');
+      else if ('raw_synced_data' in row) fail('raw_synced_data must be omitted by default');
+      else ok('raw_synced_data omitted by default');
+      if (row && row.imported_payee !== 'ACME STORE #123') fail('other fields must be kept when raw_synced_data is omitted');
+      else ok('other fields kept');
+      if (res?.transactions?.length !== 2) fail(`expected 2 rows, got ${res?.transactions?.length}`);
+      else ok('rows without raw_synced_data pass through unchanged');
+
+      const resRaw = await tool.call({ includeTransactions: true, includeRawSyncedData: true });
+      const rowRaw = resRaw?.transactions?.find((t) => t.id === 'txn-raw');
+      if (rowRaw?.raw_synced_data !== RAW) fail('raw_synced_data must be kept when includeRawSyncedData:true');
+      else ok('raw_synced_data kept on opt-in');
     } catch (e) {
       fail(`unexpected error: ${e && e.message}`);
     }
