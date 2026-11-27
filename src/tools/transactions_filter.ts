@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
+import { includeRawSyncedDataSchema, RAW_SYNCED_DATA_NOTE, shapeTransactionRows } from '../lib/transaction-fields.js';
 
 const InputSchema = z.object({
   accountId: z.string().nullable().optional().describe('Filter by specific account ID'),
@@ -13,12 +14,13 @@ const InputSchema = z.object({
   notes: z.string().nullable().optional().describe('Search in transaction notes (case-insensitive)'),
   cleared: z.boolean().nullable().optional().describe('Filter by cleared status'),
   reconciled: z.boolean().nullable().optional().describe('Filter by reconciled status'),
+  includeRawSyncedData: includeRawSyncedDataSchema,
 });
 
 
 const tool: ToolDefinition = {
   name: 'actual_transactions_filter',
-  description: 'Get transactions with advanced filtering. Supports filtering by amount range, category, payee, notes, and status. Returns filtered transactions matching all specified criteria.',
+  description: 'Get transactions with advanced filtering. Supports filtering by amount range, category, payee, notes, and status. Returns filtered transactions matching all specified criteria. ' + RAW_SYNCED_DATA_NOTE,
   inputSchema: InputSchema,
   call: async (args: unknown, _meta?: unknown) => {
     const input = InputSchema.parse(args || {});
@@ -93,7 +95,7 @@ const tool: ToolDefinition = {
       filtered = filtered.filter((t: any) => t.reconciled === input.reconciled);
     }
     
-    return { result: filtered };
+    return { result: shapeTransactionRows(filtered, input.includeRawSyncedData) };
   },
 };
 

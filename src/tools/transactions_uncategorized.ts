@@ -13,6 +13,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from '../../types/tool.d.js';
 import adapter from '../lib/actual-adapter.js';
 import { CommonSchemas } from '../lib/schemas/common.js';
+import { includeRawSyncedDataSchema, RAW_SYNCED_DATA_NOTE, shapeTransactionRows } from '../lib/transaction-fields.js';
 
 const InputSchema = z.object({
   startDate: CommonSchemas.date.optional().describe('Start date in YYYY-MM-DD format (default: all-time)'),
@@ -26,21 +27,9 @@ const InputSchema = z.object({
   includeTransactions: z.boolean().optional().default(false).describe('When true, include paginated transaction rows in the response (default: false)'),
   limit: z.number().int().min(1).max(1000).optional().default(50).describe('Max transactions per page when includeTransactions is true (default: 50, max: 1000)'),
   offset: z.number().int().min(0).optional().default(0).describe('Pagination start index when includeTransactions is true (default: 0)'),
-  // raw_synced_data is the bank feed's original record, stored verbatim. It is usually the
-  // largest field on a bank-synced row and nothing in categorization reads it (payee,
-  // imported_payee, notes, amount and date are already their own fields), so a page of rows
-  // spends most of its size on it. Omitted by default; opt back in when the raw bank text is
-  // needed to identify a merchant.
-  includeRawSyncedData: z.boolean().optional().default(false).describe('When true, keep each transaction row\'s raw_synced_data (the bank feed\'s original record). Default false: the field is omitted to keep responses small.'),
+  // See src/lib/transaction-fields.ts for why raw_synced_data is omitted by default.
+  includeRawSyncedData: includeRawSyncedDataSchema,
 });
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function withoutRawSyncedData(txn: any): any {
-  if (txn == null || typeof txn !== 'object' || !('raw_synced_data' in txn)) return txn;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { raw_synced_data: _omitted, ...rest } = txn;
-  return rest;
-}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isUncategorized(txn: any, excludedAccountIds: Set<string>): boolean {
@@ -60,7 +49,7 @@ const tool: ToolDefinition = {
     'Default response: { totalCount, totalAmount, byAccount: [{accountId, accountName, count, totalAmount}], dateRange }.',
     'Pass includeTransactions:true to also receive transactions[], count, hasMore, offset, limit.',
     'Use limit (default 50, max 1000) and offset for pagination.',
-    'Transaction rows omit raw_synced_data (the bank feed\'s original record) unless includeRawSyncedData:true.',
+    RAW_SYNCED_DATA_NOTE,
     'Excludes: transfers, split-transaction parents, opening balance entries, off-budget accounts, and closed accounts.',
     'When accountId is provided, all fields are scoped to that account.',
     'Default date range is all-time (2000-01-01 to today); pass startDate/endDate to narrow.',
@@ -143,7 +132,7 @@ const tool: ToolDefinition = {
       const limit = input.limit ?? 50;
       const offset = input.offset ?? 0;
       const slice = uncategorized.slice(offset, offset + limit);
-      const page = input.includeRawSyncedData ? slice : slice.map(withoutRawSyncedData);
+      const page = shapeTransactionRows(slice, input.includeRawSyncedData);
       result.transactions = page;
       result.count = page.length;
       result.hasMore = offset + page.length < totalCount;
